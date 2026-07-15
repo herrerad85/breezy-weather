@@ -31,6 +31,7 @@ import org.breezyweather.ui.about.AboutActivity
 import org.breezyweather.ui.alert.AlertActivity
 import org.breezyweather.ui.details.DetailsActivity
 import org.breezyweather.ui.main.MainActivity
+import org.breezyweather.ui.radar.RadarActivity
 import org.breezyweather.ui.search.SearchActivity
 import org.breezyweather.ui.settings.activities.CardDisplayManageActivity
 import org.breezyweather.ui.settings.activities.DailyTrendDisplayManageActivity
@@ -154,6 +155,21 @@ object IntentHelper {
                     SettingsActivity.KEY_SETTINGS_ACTIVITY_START_DESTINATION,
                     SettingsScreenRouter.MainScreen.route
                 )
+            }
+        )
+    }
+
+    fun startRadarActivity(
+        activity: Activity,
+        latitude: Double? = null,
+        longitude: Double? = null,
+    ) {
+        activity.startActivity(
+            Intent(activity, RadarActivity::class.java).apply {
+                if (latitude != null && longitude != null) {
+                    putExtra(RadarActivity.KEY_LATITUDE, latitude)
+                    putExtra(RadarActivity.KEY_LONGITUDE, longitude)
+                }
             }
         )
     }
