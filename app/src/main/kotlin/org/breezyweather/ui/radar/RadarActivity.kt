@@ -75,6 +75,14 @@ class RadarActivity : BreezyActivity() {
             userAgentValue = appPackage
             osmdroidBasePath = File(cacheRoot, OSMDROID_CACHE_DIR)
             osmdroidTileCache = File(osmdroidBasePath, "tiles")
+            // The loop drives FRAME_COUNT frames, each its own tile source. osmdroid's
+            // stock 2 download threads and 40-request queue can't keep up: excess tile
+            // requests are dropped, so it takes several passes to fill in and every zoom
+            // re-fetches from scratch. Widen throughput and hold more tiles in memory so
+            // re-loops and zoom changes settle in roughly one pass.
+            tileDownloadThreads = DOWNLOAD_THREADS
+            tileDownloadMaxQueueSize = DOWNLOAD_QUEUE
+            cacheMapTileCount = MEMORY_TILE_CACHE
         }
 
         binding = ActivityRadarBinding.inflate(layoutInflater)
@@ -186,6 +194,11 @@ class RadarActivity : BreezyActivity() {
         private const val DEFAULT_LONGITUDE = -98.35
         private const val INITIAL_ZOOM = 7.0
         private const val OSMDROID_CACHE_DIR = "osmdroid"
+
+        // Tile pipeline sized for the multi-frame loop (osmdroid defaults are 2 / 40 / 9).
+        private const val DOWNLOAD_THREADS: Short = 8
+        private const val DOWNLOAD_QUEUE: Short = 200
+        private const val MEMORY_TILE_CACHE: Short = 96
 
         // Loop the last hour: 10 frames at 5-minute steps, backing off ~10 min so the
         // newest requested frame has actually been published.
