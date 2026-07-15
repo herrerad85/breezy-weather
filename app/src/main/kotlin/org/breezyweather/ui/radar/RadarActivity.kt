@@ -20,12 +20,18 @@ import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import androidx.core.view.updatePadding
+import org.breezyweather.R
 import org.breezyweather.common.activities.BreezyActivity
 import org.breezyweather.common.extensions.doOnApplyWindowInsets
 import org.breezyweather.databinding.ActivityRadarBinding
 import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapListener
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
 import org.osmdroid.tileprovider.MapTileProviderBasic
+import org.osmdroid.tileprovider.cachemanager.CacheManager
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.overlay.TilesOverlay
@@ -41,9 +47,13 @@ import java.util.TimeZone
  * Radar is the US NEXRAD base-reflectivity (N0Q) composite from the Iowa Environmental
  * Mesonet, no API key. The last hour is loaded as [FRAME_COUNT] timestamped frames from
  * the WMS-T endpoint (see [NexradWmsTileSource]) and looped, one osmdroid overlay per
- * frame, toggling which one is enabled. osmdroid fetches a frame's tiles the first time
- * it is shown, so the first pass through the loop warms the on-device tile cache and
- * later passes are smooth.
+ * frame, toggling which one is enabled.
+ *
+ * Because every frame is its own tile source, naively animating means osmdroid fetches a
+ * frame's tiles the first time it is shown, which is choppy for the first passes and
+ * again after each zoom. To avoid that, every frame's tiles for the current view are
+ * pre-downloaded (osmdroid [CacheManager]) before the loop starts, behind a progress
+ * label, and the view is re-warmed in the background after a zoom or pan.
  */
 class RadarActivity : BreezyActivity() {
 
@@ -54,6 +64,7 @@ class RadarActivity : BreezyActivity() {
     private var frameOverlays: List<TilesOverlay> = emptyList()
     private var currentFrame = 0
     private var playing = true
+    private var ready = false
 
     private val advanceFrame = object : Runnable {
         override fun run() {
@@ -63,6 +74,8 @@ class RadarActivity : BreezyActivity() {
             if (playing) handler.postDelayed(this, FRAME_DELAY_MS)
         }
     }
+
+    private val backgroundPrefetch = Runnable { prefetch(initial = false) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,9 +90,7 @@ class RadarActivity : BreezyActivity() {
             osmdroidTileCache = File(osmdroidBasePath, "tiles")
             // The loop drives FRAME_COUNT frames, each its own tile source. osmdroid's
             // stock 2 download threads and 40-request queue can't keep up: excess tile
-            // requests are dropped, so it takes several passes to fill in and every zoom
-            // re-fetches from scratch. Widen throughput and hold more tiles in memory so
-            // re-loops and zoom changes settle in roughly one pass.
+            // requests are dropped. Widen throughput and hold more tiles in memory.
             tileDownloadThreads = DOWNLOAD_THREADS
             tileDownloadMaxQueueSize = DOWNLOAD_QUEUE
             cacheMapTileCount = MEMORY_TILE_CACHE
@@ -120,9 +131,80 @@ class RadarActivity : BreezyActivity() {
             view.updatePadding(bottom = insets.bottom)
         }
 
-        // Start on the most recent frame so current radar shows immediately, then loop.
-        showFrame(frames.lastIndex)
-        startLoop()
+        // Pre-download all frames for the initial view before playing, then re-warm the
+        // view in the background whenever the user zooms or pans.
+        binding.mapView.addOnFirstLayoutListener { _, _, _, _, _ -> prefetch(initial = true) }
+        binding.mapView.addMapListener(object : MapListener {
+            override fun onScroll(event: ScrollEvent?): Boolean {
+                scheduleBackgroundPrefetch()
+                return false
+            }
+
+            override fun onZoom(event: ZoomEvent?): Boolean {
+                scheduleBackgroundPrefetch()
+                return false
+            }
+        })
+    }
+
+    /**
+     * Pre-download every frame's tiles for the current viewport. On the [initial] pass a
+     * progress label is shown and the loop only starts once all frames are cached; later
+     * (background) passes just warm the cache after the view changes.
+     */
+    private fun prefetch(initial: Boolean) {
+        if (frames.isEmpty()) return
+        val bbox = binding.mapView.boundingBox
+        val zoom = binding.mapView.zoomLevelDouble.toInt()
+        val writer = binding.mapView.tileProvider.tileWriter
+        val total = frames.size
+        var completed = 0
+
+        if (initial) {
+            handler.removeCallbacks(advanceFrame)
+            showLoading(0, total)
+        }
+
+        val onDone = {
+            completed++
+            if (initial) {
+                showLoading(completed, total)
+                if (completed >= total) {
+                    binding.loadingOverlay.visibility = View.GONE
+                    ready = true
+                    showFrame(frames.lastIndex)
+                    if (playing) startLoop()
+                }
+            }
+        }
+
+        frames.forEach { time ->
+            val callback = object : CacheManager.CacheManagerCallback {
+                override fun onTaskComplete() = runOnUiThread { onDone() }
+                override fun onTaskFailed(errors: Int) = runOnUiThread { onDone() }
+                override fun updateProgress(progress: Int, currentZoomLevel: Int, zoomMin: Int, zoomMax: Int) = Unit
+                override fun downloadStarted() = Unit
+                override fun setPossibleTilesInArea(total: Int) = Unit
+            }
+            try {
+                CacheManager(NexradWmsTileSource(time), writer, zoom, zoom)
+                    .downloadAreaAsync(this, bbox, zoom, zoom, callback)
+            } catch (e: Exception) {
+                // Bulk download refused or unavailable for this frame: count it done so
+                // the loop still starts; that frame just loads on demand as before.
+                runOnUiThread { onDone() }
+            }
+        }
+    }
+
+    private fun showLoading(done: Int, total: Int) {
+        binding.loadingOverlay.visibility = View.VISIBLE
+        binding.loadingText.text = getString(R.string.radar_loading, done, total)
+    }
+
+    private fun scheduleBackgroundPrefetch() {
+        handler.removeCallbacks(backgroundPrefetch)
+        handler.postDelayed(backgroundPrefetch, REPREFETCH_DEBOUNCE_MS)
     }
 
     private fun showFrame(index: Int) {
@@ -139,6 +221,7 @@ class RadarActivity : BreezyActivity() {
     }
 
     private fun startLoop() {
+        if (!ready) return
         handler.removeCallbacks(advanceFrame)
         handler.postDelayed(advanceFrame, FRAME_DELAY_MS)
         updatePlayIcon()
@@ -169,18 +252,20 @@ class RadarActivity : BreezyActivity() {
     override fun onResume() {
         super.onResume()
         binding.mapView.onResume()
-        if (playing) startLoop()
+        if (playing && ready) startLoop()
     }
 
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(advanceFrame)
+        handler.removeCallbacks(backgroundPrefetch)
         binding.mapView.onPause()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(advanceFrame)
+        handler.removeCallbacks(backgroundPrefetch)
         binding.mapView.onDetach()
     }
 
@@ -206,5 +291,8 @@ class RadarActivity : BreezyActivity() {
         private const val FRAME_COUNT = 10
         private const val LAG_SLOTS = 2
         private const val FRAME_DELAY_MS = 800L
+
+        // Wait for the map to settle after a gesture before re-warming the cache.
+        private const val REPREFETCH_DEBOUNCE_MS = 600L
     }
 }
