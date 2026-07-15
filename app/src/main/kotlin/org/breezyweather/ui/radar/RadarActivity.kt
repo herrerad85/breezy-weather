@@ -151,8 +151,10 @@ class RadarActivity : BreezyActivity() {
     }
 
     /** Frame timestamps: 5-min, clock-aligned, UTC, backed off the composite's publish lag. */
-    private fun radarFrames(count: Int = FRAME_COUNT, lagSlots: Int = LAG_SLOTS): List<String> {
-        val newest = System.currentTimeMillis() / STEP_MS * STEP_MS - lagSlots * STEP_MS
+    private fun radarFrames(count: Int = FRAME_COUNT): List<String> {
+        // Newest published slot: step back past IEM's brief mosaic-publish lag, then snap
+        // to the 5-minute grid so we never request a frame that is not out yet.
+        val newest = (System.currentTimeMillis() - PUBLISH_LAG_MS) / STEP_MS * STEP_MS
         val format = isoUtcFormat()
         return (count - 1 downTo 0).map { i -> format.format(Date(newest - i * STEP_MS)) }
     }
@@ -200,12 +202,13 @@ class RadarActivity : BreezyActivity() {
         private const val DOWNLOAD_QUEUE: Short = 200
         private const val MEMORY_TILE_CACHE: Short = 96
 
-        // Loop the last half hour: 6 frames at 5-minute steps, backing off ~10 min so the
-        // newest requested frame has actually been published. Fewer frames means the loop
+        // Loop the last half hour: 6 frames at 5-minute steps. Fewer frames means the loop
         // fills in faster given the on-demand WMS-T source.
         private const val STEP_MS = 5 * 60 * 1000L
         private const val FRAME_COUNT = 6
-        private const val LAG_SLOTS = 2
+        // Skip only IEM's brief mosaic-publish lag (measured near-real-time) so the newest
+        // frame stays close to now.
+        private const val PUBLISH_LAG_MS = 2 * 60 * 1000L
         private const val FRAME_DELAY_MS = 800L
     }
 }
