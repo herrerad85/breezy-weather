@@ -472,6 +472,8 @@
     <string name="action_add_as_location">Add as location</string>
     <string name="action_add_debug_location" translatable="false">Add debug location</string>
     <string name="action_edit_location">Edit this location</string>
+    <string name="action_radar">Radar</string>
+    <string name="radar_attribution">Radar: NEXRAD via Iowa Environmental Mesonet · Map: © OpenStreetMap contributors</string>
     <string name="action_open_in_other_app">Open in another app</string>
     <string name="action_open_in_other_app_description">Open this location in another app</string>
     <string name="action_open_in_other_app_no_app">No maps app found</string>

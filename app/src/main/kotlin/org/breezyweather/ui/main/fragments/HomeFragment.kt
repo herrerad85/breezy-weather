@@ -49,6 +49,7 @@ import org.breezyweather.common.extensions.isMotionReduced
 import org.breezyweather.common.extensions.isTabletDevice
 import org.breezyweather.common.extensions.setSystemBarStyle
 import org.breezyweather.common.options.appearance.BackgroundAnimationMode
+import org.breezyweather.common.utils.helpers.IntentHelper
 import org.breezyweather.databinding.FragmentHomeBinding
 import org.breezyweather.domain.location.model.getPlace
 import org.breezyweather.domain.settings.SettingsManager
@@ -197,6 +198,10 @@ class HomeFragment : MainModuleFragment() {
         binding.toolbar.setOnMenuItemClickListener { menuItem ->
             when (menuItem.itemId) {
                 R.id.action_edit -> callback?.onEditIconClicked()
+                R.id.action_radar -> {
+                    val location = viewModel.currentLocation.value?.location
+                    IntentHelper.startRadarActivity(requireActivity(), location?.latitude, location?.longitude)
+                }
                 R.id.action_open_in_other_app -> callback?.onOpenInOtherAppIconClicked()
             }
             true

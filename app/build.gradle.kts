@@ -469,6 +469,9 @@ dependencies {
     implementation(libs.cardview)
     implementation(libs.swiperefreshlayout)
 
+    // radar map (osmdroid raster tiles)
+    implementation(libs.osmdroid.android)
+
     implementation(platform(libs.compose.bom))
     implementation(libs.activity.compose)
     implementation(libs.compose.material.ripple)

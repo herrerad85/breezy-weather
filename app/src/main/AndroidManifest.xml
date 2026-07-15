@@ -150,6 +150,11 @@
             android:theme="@style/BreezyWeatherTheme" />
 
         <activity
+            android:name=".ui.radar.RadarActivity"
+            android:label="@string/action_radar"
+            android:theme="@style/BreezyWeatherTheme" />
+
+        <activity
             android:name=".ui.alert.AlertActivity"
             android:label="@string/alerts"
             android:theme="@style/BreezyWeatherTheme" />
