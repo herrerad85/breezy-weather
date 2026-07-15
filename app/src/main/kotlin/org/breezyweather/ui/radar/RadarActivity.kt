@@ -187,8 +187,10 @@ class RadarActivity : BreezyActivity() {
                 override fun setPossibleTilesInArea(total: Int) = Unit
             }
             try {
+                // NoUI: fire only our callback, never osmdroid's built-in progress
+                // dialog (10 frames would otherwise stack 10 dialogs on every pan/zoom).
                 CacheManager(NexradWmsTileSource(time), writer, zoom, zoom)
-                    .downloadAreaAsync(this, bbox, zoom, zoom, callback)
+                    .downloadAreaAsyncNoUI(this, bbox, zoom, zoom, callback)
             } catch (e: Exception) {
                 // Bulk download refused or unavailable for this frame: count it done so
                 // the loop still starts; that frame just loads on demand as before.
