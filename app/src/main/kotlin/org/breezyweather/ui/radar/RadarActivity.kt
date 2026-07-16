@@ -21,42 +21,52 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.core.view.updatePadding
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.breezyweather.R
 import org.breezyweather.common.activities.BreezyActivity
 import org.breezyweather.common.extensions.doOnApplyWindowInsets
 import org.breezyweather.databinding.ActivityRadarBinding
+import org.json.JSONObject
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.MapTileProviderBasic
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.overlay.TilesOverlay
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.TimeZone
 
 /**
  * Animated weather radar over an OpenStreetMap base.
  *
- * Radar is the US NEXRAD base-reflectivity (N0Q) composite from the Iowa Environmental
- * Mesonet, no API key. The last [FRAME_COUNT] frames (5-minute steps) come from the
- * timestamped WMS-T endpoint (see [NexradWmsTileSource]) and are looped, one osmdroid
- * overlay per frame, toggling which one is enabled.
+ * Radar comes from a self-hosted [LibreWXR](https://github.com/JoshuaKimsey/LibreWXR)
+ * instance, which pre-renders the US NEXRAD (NOAA MRMS) composite as RainViewer-format
+ * XYZ tiles. Because the tiles are already rendered, the loop loads fast and stays smooth
+ * over a full hour of frames, unlike an on-demand WMS source.
  *
- * That endpoint renders each tile on demand server-side, so frames stream in over the
- * first loop rather than appearing instantly; osmdroid downloads them in parallel across
- * the widened thread pool below. A truly instant, smooth loop needs a source that serves
- * pre-rendered timestamped tiles (e.g. a self-hosted radar tile server).
+ * The frame list is read from the instance's `weather-maps.json`; each frame becomes one
+ * osmdroid overlay, and the loop toggles which one is enabled.
  */
 class RadarActivity : BreezyActivity() {
+
+    private data class Frame(val timeSeconds: Long, val path: String)
 
     private lateinit var binding: ActivityRadarBinding
     private val handler = Handler(Looper.getMainLooper())
 
-    private var frames: List<String> = emptyList()
+    private var host: String = RADAR_BASE_URL
+    private var frames: List<Frame> = emptyList()
     private var frameOverlays: List<TilesOverlay> = emptyList()
     private var currentFrame = 0
     private var playing = true
+    private var ready = false
 
     private val advanceFrame = object : Runnable {
         override fun run() {
@@ -72,8 +82,7 @@ class RadarActivity : BreezyActivity() {
 
         // osmdroid reads its Configuration when the MapView is inflated, so set it first.
         // Keep the tile cache app-private (cacheDir) so no storage permission is needed,
-        // and widen the tile pipeline (defaults 2 / 40 / 9) so the loop's frames download
-        // in parallel instead of being dropped from a small queue.
+        // and widen the tile pipeline (defaults 2 / 40 / 9) for the multi-frame loop.
         val appPackage = packageName
         val cacheRoot = cacheDir
         Configuration.getInstance().apply {
@@ -94,8 +103,6 @@ class RadarActivity : BreezyActivity() {
         val latitude = intent.getDoubleExtra(KEY_LATITUDE, DEFAULT_LATITUDE)
         val longitude = intent.getDoubleExtra(KEY_LONGITUDE, DEFAULT_LONGITUDE)
 
-        frames = radarFrames()
-
         binding.mapView.apply {
             setTileSource(TileSourceFactory.MAPNIK)
             setMultiTouchControls(true)
@@ -104,32 +111,67 @@ class RadarActivity : BreezyActivity() {
             controller.setCenter(GeoPoint(latitude, longitude))
         }
 
-        frameOverlays = frames.map { time ->
-            val provider = MapTileProviderBasic(applicationContext, NexradWmsTileSource(time))
-            TilesOverlay(provider, this).apply {
-                // Don't paint the default grey "loading" backdrop over the base map.
-                setLoadingBackgroundColor(Color.TRANSPARENT)
-                setLoadingLineColor(Color.TRANSPARENT)
-                isEnabled = false
-            }
-        }
-        frameOverlays.forEach { binding.mapView.overlays.add(it) }
-
         binding.playPause.setOnClickListener { togglePlay() }
         binding.controlBar.doOnApplyWindowInsets { view, insets ->
             view.updatePadding(bottom = insets.bottom)
         }
 
-        // Start on the most recent frame so current radar shows first, then loop.
-        showFrame(frames.lastIndex)
-        startLoop()
+        loadRadar()
+    }
+
+    /** Fetch the frame list from LibreWXR, then build one overlay per frame and loop. */
+    private fun loadRadar() {
+        lifecycleScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { fetchFrames() }.getOrNull() }
+            if (fetched == null || fetched.second.isEmpty()) {
+                binding.timestamp.text = getString(R.string.radar_unavailable)
+                return@launch
+            }
+            host = fetched.first
+            frames = fetched.second
+            frameOverlays = frames.map { frame ->
+                val source = XYTileSource(
+                    "librewxr-${frame.timeSeconds}",
+                    0,
+                    MAX_ZOOM,
+                    256,
+                    "/$COLOR_SCHEME/1_1.png",
+                    arrayOf("$host${frame.path}/256/")
+                )
+                TilesOverlay(MapTileProviderBasic(applicationContext, source), this@RadarActivity).apply {
+                    setLoadingBackgroundColor(Color.TRANSPARENT)
+                    setLoadingLineColor(Color.TRANSPARENT)
+                    isEnabled = false
+                }
+            }
+            frameOverlays.forEach { binding.mapView.overlays.add(it) }
+            ready = true
+            showFrame(frames.lastIndex)
+            startLoop()
+        }
+    }
+
+    private fun fetchFrames(): Pair<String, List<Frame>> {
+        val connection = (URL("$RADAR_BASE_URL/public/weather-maps.json").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 10_000
+            readTimeout = 10_000
+        }
+        val body = connection.inputStream.bufferedReader().use { it.readText() }
+        val root = JSONObject(body)
+        val resolvedHost = root.optString("host", RADAR_BASE_URL).ifBlank { RADAR_BASE_URL }
+        val past = root.getJSONObject("radar").getJSONArray("past")
+        val list = (0 until past.length()).map { i ->
+            val f = past.getJSONObject(i)
+            Frame(f.getLong("time"), f.getString("path"))
+        }
+        return resolvedHost to list
     }
 
     private fun showFrame(index: Int) {
         currentFrame = index
         frameOverlays.forEachIndexed { i, overlay -> overlay.isEnabled = i == index }
         binding.mapView.invalidate()
-        binding.timestamp.text = formatFrameTime(frames[index])
+        binding.timestamp.text = formatFrameTime(frames[index].timeSeconds)
     }
 
     private fun togglePlay() {
@@ -139,6 +181,7 @@ class RadarActivity : BreezyActivity() {
     }
 
     private fun startLoop() {
+        if (!ready) return
         handler.removeCallbacks(advanceFrame)
         handler.postDelayed(advanceFrame, FRAME_DELAY_MS)
         updatePlayIcon()
@@ -150,28 +193,14 @@ class RadarActivity : BreezyActivity() {
         )
     }
 
-    /** Frame timestamps: 5-min, clock-aligned, UTC, backed off the composite's publish lag. */
-    private fun radarFrames(count: Int = FRAME_COUNT): List<String> {
-        // Newest published slot: step back past IEM's brief mosaic-publish lag, then snap
-        // to the 5-minute grid so we never request a frame that is not out yet.
-        val newest = (System.currentTimeMillis() - PUBLISH_LAG_MS) / STEP_MS * STEP_MS
-        val format = isoUtcFormat()
-        return (count - 1 downTo 0).map { i -> format.format(Date(newest - i * STEP_MS)) }
-    }
-
-    private fun formatFrameTime(iso: String): String {
-        val local = SimpleDateFormat("h:mm a", Locale.getDefault())
-        return runCatching { local.format(isoUtcFormat().parse(iso)!!) }.getOrDefault(iso)
-    }
-
-    private fun isoUtcFormat() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
+    private fun formatFrameTime(timeSeconds: Long): String {
+        return SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(timeSeconds * 1000))
     }
 
     override fun onResume() {
         super.onResume()
         binding.mapView.onResume()
-        if (playing) startLoop()
+        if (playing && ready) startLoop()
     }
 
     override fun onPause() {
@@ -190,11 +219,19 @@ class RadarActivity : BreezyActivity() {
         const val KEY_LATITUDE = "latitude"
         const val KEY_LONGITUDE = "longitude"
 
+        // Self-hosted LibreWXR instance serving pre-rendered US radar tiles. Change this
+        // to point the fork at a different instance.
+        private const val RADAR_BASE_URL = "https://radar.loafsupport.com"
+
+        // RainViewer color scheme id (0-8). 2 = universal blue; swap for a different look.
+        private const val COLOR_SCHEME = 2
+
         // Fallback view: geographic center of the contiguous US, used when no location
-        // is supplied (radar coverage is US-only anyway).
+        // is supplied (radar coverage is US-only).
         private const val DEFAULT_LATITUDE = 39.5
         private const val DEFAULT_LONGITUDE = -98.35
         private const val INITIAL_ZOOM = 7.0
+        private const val MAX_ZOOM = 12
         private const val OSMDROID_CACHE_DIR = "osmdroid"
 
         // Tile pipeline sized for the multi-frame loop (osmdroid defaults are 2 / 40 / 9).
@@ -202,13 +239,6 @@ class RadarActivity : BreezyActivity() {
         private const val DOWNLOAD_QUEUE: Short = 200
         private const val MEMORY_TILE_CACHE: Short = 96
 
-        // Loop the last half hour: 6 frames at 5-minute steps. Fewer frames means the loop
-        // fills in faster given the on-demand WMS-T source.
-        private const val STEP_MS = 5 * 60 * 1000L
-        private const val FRAME_COUNT = 6
-        // Skip only IEM's brief mosaic-publish lag (measured near-real-time) so the newest
-        // frame stays close to now.
-        private const val PUBLISH_LAG_MS = 2 * 60 * 1000L
         private const val FRAME_DELAY_MS = 800L
     }
 }
